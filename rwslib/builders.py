@@ -274,6 +274,56 @@ class TransactionalElement(ODMElement):
         self._transaction_type = value
 
 
+class MdsolQuery(ODMElement):
+    """MdsolQuery extension element for Queries at item level only"""
+
+    def __init__(self, value=None, query_repeat_key=None, recipient=None, status=None, requires_response=None,
+                 response=None):
+        self.value = value
+        self.query_repeat_key = query_repeat_key
+        self.recipient = recipient
+        self._status = None
+        self.status = status
+        self.requires_response = requires_response
+        self.response = response
+
+    @property
+    def status(self):
+        return self._status
+
+    @status.setter
+    def status(self, value):
+        if value is not None:
+            if not isinstance(value, QueryStatusType):
+                raise AttributeError("%s action type is invalid in mdsol:Query." % (value,))
+        self._status = value
+
+    def build(self, builder):
+        params = {}
+
+        if self.value is not None:
+            params['Value'] = str(self.value)
+
+        if self.query_repeat_key is not None:
+            params['QueryRepeatKey'] = str(self.query_repeat_key)
+
+        if self.recipient is not None:
+            params['Recipient'] = str(self.recipient)
+
+        if self.status is not None:
+            params['Status'] = self.status.value
+
+        if self.requires_response is not None:
+            params['RequiresResponse'] = bool_to_yes_no(self.requires_response)
+
+        # When closing a query
+        if self.response is not None:
+            params['Response'] = str(self.response)
+
+        builder.start("mdsol:Query", params)
+        builder.end("mdsol:Query")
+
+
 class ItemData(TransactionalElement):
     """Models the ODM ItemData object"""
     ALLOWED_TRANSACTION_TYPES = ['Insert', 'Update', 'Upsert', 'Context', 'Remove']
@@ -288,6 +338,8 @@ class ItemData(TransactionalElement):
         self.freeze = freeze
         self.verify = verify
         self.audit_record = None
+        self.queries = []
+        self.measurement_unit_ref = None
 
     def build(self, builder):
         """Build XML by appending to builder
@@ -316,14 +368,24 @@ class ItemData(TransactionalElement):
             params['mdsol:Verify'] = bool_to_yes_no(self.verify)
 
         builder.start("ItemData", params)
+
         if self.audit_record is not None:
             self.audit_record.build(builder)
+
+        # Measurement unit ref must be after audit record or RWS complains
+        if self.measurement_unit_ref is not None:
+            self.measurement_unit_ref.build(builder)
+
+        for query in self.queries:
+            query.build(builder)
         builder.end("ItemData")
 
     def __lshift__(self, other):
-        if not isinstance(other, AuditRecord):
-            raise ValueError("ItemData object can only receive AuditRecord object")
+        if not isinstance(other, (MeasurementUnitRef, AuditRecord, MdsolQuery,)):
+            raise ValueError("ItemData object can only receive MeasurementUnitRef, AuditRecord or MdsolQuery objects")
+        self.set_single_attribute(other, MeasurementUnitRef, 'measurement_unit_ref')
         self.set_single_attribute(other, AuditRecord, 'audit_record')
+        self.set_list_attribute(other, MdsolQuery, 'queries')
         return other
 
 
@@ -417,7 +479,7 @@ class StudyEventData(TransactionalElement):
     def __init__(self, study_event_oid, transaction_type="Update", study_event_repeat_key=None):
         super(self.__class__, self).__init__(transaction_type)
         self.study_event_oid = study_event_oid
-        self.study_event_repeat_key = str(study_event_repeat_key)
+        self.study_event_repeat_key = study_event_repeat_key
         self.forms = []
 
     def __lshift__(self, other):
@@ -458,12 +520,16 @@ class SubjectData(TransactionalElement):
         self.subject_key = subject_key
         self.subject_key_type = subject_key_type
         self.study_events = []  # Can have collection
+        self.audit_record = None
 
     def __lshift__(self, other):
         """Override << operator"""
-        if not isinstance(other, StudyEventData):
-            raise ValueError("SubjectData object can only receive StudyEventData object")
+        if not isinstance(other, (StudyEventData, AuditRecord,)):
+            raise ValueError("SubjectData object can only receive StudyEventData or AuditRecord object")
+
         self.set_list_attribute(other, StudyEventData, 'study_events')
+        self.set_single_attribute(other, AuditRecord, 'audit_record')
+
         return other
 
     def build(self, builder):
@@ -476,21 +542,26 @@ class SubjectData(TransactionalElement):
 
         builder.start("SubjectData", params)
 
+        # Ask children
+        if self.audit_record is not None:
+            self.audit_record.build(builder)
+
         builder.start("SiteRef", {'LocationOID': self.sitelocationoid})
         builder.end("SiteRef")
 
-        # Ask children
         for event in self.study_events:
             event.build(builder)
+
         builder.end("SubjectData")
 
 
 class ClinicalData(ODMElement):
     """Models the ODM ClinicalData object"""
 
-    def __init__(self, projectname, environment):
+    def __init__(self, projectname, environment, metadata_version_oid="1"):
         self.projectname = projectname
         self.environment = environment
+        self.metadata_version_oid = metadata_version_oid
         self.subject_data = None
 
     def __lshift__(self, other):
@@ -502,7 +573,7 @@ class ClinicalData(ODMElement):
 
     def build(self, builder):
         """Build XML by appending to builder"""
-        params = dict(MetaDataVersionOID='1',
+        params = dict(MetaDataVersionOID=self.metadata_version_oid,
                       StudyOID="%s (%s)" % (self.projectname, self.environment,),
                       )
 
@@ -1770,6 +1841,7 @@ class MdsolCheckAction(ODMElement):
     Check Action modeled after check action in Architect Loader spreadsheet.
     Do not use directly, use appropriate sub-class.
     """
+
     def __init__(self,
                  variable_oid=None,
                  field_oid=None,

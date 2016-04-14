@@ -173,6 +173,36 @@ class TestAuditRecord(unittest.TestCase):
             doc = obj_to_doc(self.tested)
             self.assertIn("DateTimeStamp", err.exception.message)
 
+class TestMdsolQuery(unittest.TestCase):
+    """Test extension MdsolQuery"""
+    def get_tested(self):
+        return MdsolQuery(status=QueryStatusType.Open, value="Data missing", query_repeat_key=123,
+                            recipient="Site from System", requires_response=True)
+
+    def test_basic(self):
+        tested = self.get_tested()
+        self.assertEqual("Data missing",tested.value)
+        self.assertEqual(123,tested.query_repeat_key)
+        self.assertEqual(QueryStatusType.Open,tested.status)
+        self.assertEqual("Site from System",tested.recipient)
+        self.assertEqual(True,tested.requires_response)
+
+    def test_builder(self):
+        tested = self.get_tested()
+        tested.response = "Done"
+        doc = obj_to_doc(tested)
+        self.assertEqual("mdsol:Query", doc.tag)
+        self.assertEqual("Yes", doc.attrib['RequiresResponse'])
+        self.assertEqual("Site from System", doc.attrib['Recipient'])
+        self.assertEqual("123", doc.attrib['QueryRepeatKey'])
+        self.assertEqual("Data missing", doc.attrib['Value'])
+        self.assertEqual("Done", doc.attrib['Response'])
+
+    def test_invalid_status_value(self):
+        """Status must come from QueryStatusType"""
+        with self.assertRaises(AttributeError):
+            MdsolQuery(status='A test')
+
 
 class TestItemData(unittest.TestCase):
     """Test ItemData classes"""
@@ -191,6 +221,18 @@ class TestItemData(unittest.TestCase):
         """Test that an ItemData will not accept any old object"""
         with self.assertRaises(ValueError):
             self.tested << {"Field1" : "ValueC"}
+
+    def test_accepts_query(self):
+        """Test that an ItemData will accept a query"""
+        query = MdsolQuery()
+        self.tested << query
+        self.assertEqual(query, self.tested.queries[0])
+
+    def test_accepts_measurement_unit_ref(self):
+        """Test that an ItemData will accept a measurement unit ref"""
+        mur = MeasurementUnitRef("Celsius")
+        self.tested << mur
+        self.assertEqual(mur, self.tested.measurement_unit_ref)
 
     def test_isnull_not_set(self):
         """Isnull should not be set where we have a value not in '', None"""
@@ -226,6 +268,10 @@ class TestItemData(unittest.TestCase):
             ReasonForChange("Data Entry Error"),
             DateTimeStamp(datetime(2015, 9, 11, 10, 15, 22, 80))
         )
+        tested << MdsolQuery()
+        tested << MeasurementUnitRef("Celsius")
+
+
         doc = obj_to_doc(tested)
 
         self.assertEqual(doc.attrib['ItemOID'],"FIELDA")
@@ -235,6 +281,8 @@ class TestItemData(unittest.TestCase):
         self.assertEqual(doc.attrib['mdsol:Freeze'],"No")
         self.assertEqual(doc.tag,"ItemData")
         self.assertEqual("AuditRecord",doc.getchildren()[0].tag)
+        self.assertEqual("MeasurementUnitRef",doc.getchildren()[1].tag)
+        self.assertEqual("mdsol:Query",doc.getchildren()[2].tag)
 
     def test_transaction_type(self):
         tested = self.tested
@@ -410,6 +458,7 @@ class TestStudyEventData(unittest.TestCase):
     def test_builders_basic(self):
         doc = obj_to_doc(self.tested)
         self.assertEqual(doc.attrib["StudyEventOID"],"VISIT_1")
+        self.assertIsNone(doc.attrib.get("StudyEventRepeatKey"))
         self.assertEqual(len(doc),1)
         self.assertEqual(doc.tag,"StudyEventData")
 
@@ -472,7 +521,7 @@ class TestSubjectData(unittest.TestCase):
         self.assertRaises(AttributeError, do)
 
     def test_children(self):
-        """Test there are 3 children"""
+        """Test there is 1 child"""
         self.assertEqual(1, len(self.tested.study_events))
 
     def test_invalid_transaction_type(self):
@@ -497,11 +546,24 @@ class TestSubjectData(unittest.TestCase):
             self.tested << sed
         self.assertRaises(ValueError,do)
 
-    def test_only_accepts_studyeventdata(self):
-        """Test that only StudyEventData can be inserted"""
+    def test_does_not_accept_all_elements(self):
+        """Test that,for example, ItemData cannot be accepted"""
         def do():
             self.tested << ItemData("Field1", "ValueC")
         self.assertRaises(ValueError, do)
+
+    def test_accepts_auditrecord(self):
+        """Test that AuditRecord can be inserted"""
+        ar = AuditRecord(used_imputation_method=False,
+                         identifier='ABC1',
+                         include_file_oid=False)(
+                            UserRef('test_user'),
+                            LocationRef('test_site'),
+                            ReasonForChange("Testing"),
+                            DateTimeStamp(datetime.now())
+                         )
+        self.tested << ar
+        self.assertEqual(self.tested.audit_record, ar)
 
 
 class TestClinicalData(unittest.TestCase):
@@ -527,6 +589,15 @@ class TestClinicalData(unittest.TestCase):
         """Test there are 3 children"""
         self.assertEqual("STUDY1", self.tested.projectname)
         self.assertEqual("DEV", self.tested.environment)
+        # Test default MetadataVersionOID
+        self.assertEqual("1", self.tested.metadata_version_oid)
+
+
+    def test_metadata_version_oid(self):
+        self.tested.metadata_version_oid = '2'
+        doc = obj_to_doc(self.tested)
+        self.assertEqual(doc.attrib["MetaDataVersionOID"],self.tested.metadata_version_oid)
+
 
     def test_only_accepts_subjectdata(self):
         """Test that only SubjectData can be inserted"""
